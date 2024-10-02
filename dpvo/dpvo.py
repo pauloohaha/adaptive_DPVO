@@ -11,6 +11,8 @@ from .net import VONet
 from .utils import *
 from . import projective_ops as pops
 
+import math
+
 autocast = torch.cuda.amp.autocast
 Id = SE3.Identity(1, device="cuda")
 
@@ -85,6 +87,15 @@ class DPVO:
         self.viewer = None
         if viz:
             self.start_viewer()
+
+        # dynamic debug
+        self.dynamic_debug_delta_average_log = [] #average delta of the current sampled frame
+        self.dynamic_debug_depth_average_log = [] #average depth of the current sampled frame
+        self.dynamic_debug_confidence_average_log = [] #average confidence of the current sampled frame
+        self.dynamic_debug_tstamp_log = []
+        self.dynamic_debug_translation_log = []
+        self.dynamic_debug_motionmag_log = []
+        self.dynamic_debug_out_bound_log = []
 
     def load_weights(self, network):
         # load network from checkpoint file
@@ -166,12 +177,23 @@ class DPVO:
         poses = [self.get_pose(t) for t in range(self.counter)]
         poses = lietorch.stack(poses, dim=0)
         poses = poses.inv().data.cpu().numpy()
-        tstamps = np.array(self.tlist, dtype=np.float)
+        tstamps = np.array(self.tlist, dtype=float)
 
         if self.viewer is not None:
             self.viewer.join()
 
-        return poses, tstamps
+        dynamic_slam_logger = {
+        'confidence': self.dynamic_debug_confidence_average_log,
+        'depth':      self.dynamic_debug_depth_average_log,
+        'delta':      self.dynamic_debug_delta_average_log,
+        'tstamp':     self.dynamic_debug_tstamp_log,
+        'translation':self.dynamic_debug_translation_log,
+        'motionmag':  self.dynamic_debug_motionmag_log,
+        'outlog':     self.dynamic_debug_out_bound_log
+    }
+
+
+        return poses, tstamps, dynamic_slam_logger
 
     def corr(self, coords, indicies=None):
         """ local correlation volume """
@@ -280,6 +302,14 @@ class DPVO:
             lmbda = torch.as_tensor([1e-4], device="cuda")
             weight = weight.float()
             target = coords[...,self.P//2,self.P//2] + delta.float()
+            self.dynamic_debug_current_average_delta = torch.mean(torch.abs(delta[0][self.jj == (self.n-1)])).tolist()
+            self.dynamic_debug_current_average_confidence = torch.sum(weight[0][self.jj == (self.n-1)]).tolist()
+
+            #out bound cnt
+            total_edges = (corr[0, self.ii == (self.n-1)] == 0).all(dim=1).shape[0] + (corr[0, self.jj == (self.n-1)] == 0).all(dim=1).shape[0]
+            total_out = (corr[0, self.ii == (self.n-1)] == 0).all(dim=1).sum().tolist() + (corr[0, self.jj == (self.n-1)] == 0).all(dim=1).sum().tolist()
+            self.dynamic_debug_current_out_rate = total_out/total_edges
+            
 
         with Timer("BA", enabled=self.enable_timing):
             t0 = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
@@ -294,6 +324,15 @@ class DPVO:
             points = pops.point_cloud(SE3(self.poses), self.patches[:, :self.m], self.intrinsics, self.ix[:self.m])
             points = (points[...,1,1,:3] / points[...,1,1,3:]).reshape(-1, 3)
             self.points_[:len(points)] = points[:]
+            self.dynamic_debug_current_average_depth = torch.mean(self.patches_[self.n-1, :, 2, :, :]).tolist()
+            dx = (self.poses[0][self.n-1][0] - self.poses[0][self.n-self.cfg.KEYFRAME_INDEX+1][0]).tolist()
+            dy = (self.poses[0][self.n-1][1] - self.poses[0][self.n-self.cfg.KEYFRAME_INDEX+1][1]).tolist()
+            dz = (self.poses[0][self.n-1][2] - self.poses[0][self.n-self.cfg.KEYFRAME_INDEX+1][2]).tolist()
+            dx = dx ** 2
+            dy = dy ** 2
+            dz = dz ** 2
+            self.dynamic_debug_current_translation = math.sqrt(dx + dy + dz)
+            self.dynamic_debug_current_motion_mag = self.motionmag(self.n-1, self.n-self.cfg.KEYFRAME_INDEX+1) + self.motionmag(self.n-self.cfg.KEYFRAME_INDEX+1, self.n-1)
                 
     def __edges_all(self):
         return flatmeshgrid(
@@ -315,9 +354,9 @@ class DPVO:
         return flatmeshgrid(torch.arange(t0, t1, device="cuda"),
             torch.arange(max(self.n-r, 0), self.n, device="cuda"), indexing='ij')
 
-    def __call__(self, tstamp, image, intrinsics):
+    def __call__(self, tstamp, image, intrinsics, tstamp_log):
         """ track new frame """
-
+        print("frame :" + str(self.n))
         if (self.n+1) >= self.N:
             raise Exception(f'The buffer size is too small. You can increase it using "--buffer {self.N*2}"')
 
@@ -377,6 +416,7 @@ class DPVO:
                 self.delta[self.counter - 1] = (self.counter - 2, Id[0])
                 return
 
+        
         self.n += 1
         self.m += self.M
 
@@ -393,6 +433,25 @@ class DPVO:
         elif self.is_initialized:
             self.update()
             self.keyframe()
+
+        #dynamic slam logger
+        if self.is_initialized:
+            self.dynamic_debug_delta_average_log.append(self.dynamic_debug_current_average_delta)
+            self.dynamic_debug_confidence_average_log.append(self.dynamic_debug_current_average_confidence)
+            self.dynamic_debug_depth_average_log.append(self.dynamic_debug_current_average_depth)
+            self.dynamic_debug_tstamp_log.append(tstamp_log)
+            self.dynamic_debug_translation_log.append(self.dynamic_debug_current_translation)
+            self.dynamic_debug_motionmag_log.append(self.dynamic_debug_current_motion_mag)
+            self.dynamic_debug_out_bound_log.append(self.dynamic_debug_current_out_rate)
+        else:
+            self.dynamic_debug_delta_average_log.append(None)
+            self.dynamic_debug_confidence_average_log.append(None)
+            self.dynamic_debug_depth_average_log.append(None)
+            self.dynamic_debug_tstamp_log.append(None)
+            self.dynamic_debug_translation_log.append(None)
+            self.dynamic_debug_motionmag_log.append(None)
+            self.dynamic_debug_out_bound_log.append(None)
+
 
             
 

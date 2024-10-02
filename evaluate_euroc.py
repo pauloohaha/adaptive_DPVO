@@ -12,7 +12,7 @@ from dpvo.utils import Timer
 from dpvo.dpvo import DPVO
 from dpvo.stream import image_stream
 from dpvo.config import cfg
-from dpvo.plot_utils import plot_trajectory, save_trajectory_tum_format
+#from dpvo.plot_utils import plot_trajectory, save_trajectory_tum_format
 
 import torch
 from multiprocessing import Process, Queue
@@ -24,6 +24,9 @@ from evo.tools import file_interface
 from evo.core import sync
 import evo.main_ape as main_ape
 from evo.core.metrics import PoseRelation
+
+#dynamic slam data log
+import pickle
 
 
 SKIP = 0
@@ -41,9 +44,9 @@ def run(cfg, network, imagedir, calib, stride=1, viz=False):
     queue = Queue(maxsize=8)
     reader = Process(target=image_stream, args=(queue, imagedir, calib, stride, 0))
     reader.start()
-
+    
     while 1:
-        (t, image, intrinsics) = queue.get()
+        (t, image, intrinsics, tstamp) = queue.get()
         if t < 0: break
 
         image = torch.from_numpy(image).permute(2,0,1).cuda()
@@ -59,7 +62,7 @@ def run(cfg, network, imagedir, calib, stride=1, viz=False):
         intrinsics = intrinsics.cuda()
 
         with Timer("SLAM", enabled=False):
-            slam(t, image, intrinsics)
+            slam(t, image, intrinsics, tstamp)
 
     for _ in range(12):
         slam.update()
@@ -79,7 +82,7 @@ if __name__ == '__main__':
     parser.add_argument('--trials', type=int, default=1)
     parser.add_argument('--eurocdir', default="datasets/EUROC")
     parser.add_argument('--plot', action="store_true")
-    parser.add_argument('--save_trajectory', action="store_true")
+    parser.add_argument('--save_trajectory', action="store_true",default=False)
     args = parser.parse_args()
 
     cfg.merge_from_file(args.config)
@@ -109,39 +112,48 @@ if __name__ == '__main__':
         groundtruth = "datasets/euroc_groundtruth/{}.txt".format(scene) 
 
         scene_results = []
-        for i in range(args.trials):
-            traj_est, timestamps = run(cfg, args.network, imagedir, "calib/euroc.txt", args.stride, args.viz)
+        for num_patch in range(96, 0, -16):
+          for num_frame in range(22, 0, -6):
+            cfg['PATCHES_PER_FRAME'] = num_patch
+            cfg['REMOVAL_WINDOW'] = num_frame
+            for i in range(args.trials):
+                traj_est, timestamps, dynamic_slam_logger = run(cfg, args.network, imagedir, "calib/euroc.txt", args.stride, args.viz)
 
-            images_list = sorted(glob.glob(os.path.join(imagedir, "*.png")))[::args.stride]
-            tstamps = [float(x.split('/')[-1][:-4]) for x in images_list]
+                images_list = sorted(glob.glob(os.path.join(imagedir, "*.png")))[::args.stride]
+                tstamps = [float(x.split('/')[-1][:-4]) for x in images_list]
 
-            traj_est = PoseTrajectory3D(
-                positions_xyz=traj_est[:,:3],
-                orientations_quat_wxyz=traj_est[:,3:],
-                timestamps=np.array(tstamps))
+                traj_est = PoseTrajectory3D(
+                    positions_xyz=traj_est[:,:3],
+                    orientations_quat_wxyz=traj_est[:,3:],
+                    timestamps=np.array(tstamps))
 
-            traj_ref = file_interface.read_tum_trajectory_file(groundtruth)
-            traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
+                traj_ref = file_interface.read_tum_trajectory_file(groundtruth)
+                traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
 
-            result = main_ape.ape(traj_ref, traj_est, est_name='traj', 
-                pose_relation=PoseRelation.translation_part, align=True, correct_scale=True)
-            ate_score = result.stats["rmse"]
+                result = main_ape.ape(traj_ref, traj_est, est_name='traj', 
+                    pose_relation=PoseRelation.translation_part, align=True, correct_scale=True)
+                ate_score = result.stats["rmse"]
 
-            if args.plot:
-                scene_name = '_'.join(scene.split('/')[1:]).title()
-                Path("trajectory_plots").mkdir(exist_ok=True)
-                plot_trajectory(traj_est, traj_ref, f"Euroc {scene} Trial #{i+1} (ATE: {ate_score:.03f})",
-                                f"trajectory_plots/Euroc_{scene}_Trial{i+1:02d}.pdf", align=True, correct_scale=True)
+                dynamic_slam_logger['result'] = result
 
-            if args.save_trajectory:
-                Path("saved_trajectories").mkdir(exist_ok=True)
-                save_trajectory_tum_format(traj_est, f"saved_trajectories/Euroc_{scene}_Trial{i+1:02d}.txt")
+                # if args.plot:
+                #     scene_name = '_'.join(scene.split('/')[1:]).title()
+                #     Path("trajectory_plots").mkdir(exist_ok=True)
+                #     plot_trajectory(traj_est, traj_ref, f"Euroc {scene} Trial #{i+1} (ATE: {ate_score:.03f})",
+                #                     f"trajectory_plots/Euroc_{scene}_Trial{i+1:02d}.pdf", align=True, correct_scale=True)
 
-            scene_results.append(ate_score)
+                # if args.save_trajectory:
+                #     Path("saved_trajectories").mkdir(exist_ok=True)
+                #     save_trajectory_tum_format(traj_est, f"saved_trajectories/Euroc_{scene}_Trial{i+1:02d}.txt")
+
+                scene_results.append(ate_score)
+                dynamic_log_picke_file = open("dynamic_slam_log/logs/dynamic_slam_log_movement_outbound_"+scene+"_"+str(num_patch)+"_patches_"+str(num_frame)+"_frames_trials_"+str(i)+".pickle", "wb")
+                pickle.dump(dynamic_slam_logger, dynamic_log_picke_file)
 
         results[scene] = np.median(scene_results)
         print(scene, sorted(scene_results))
 
+    
     xs = []
     for scene in results:
         print(scene, results[scene])

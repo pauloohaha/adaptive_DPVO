@@ -1,5 +1,6 @@
 import os
 import cv2
+import glob
 import numpy as np
 from multiprocessing import Process, Queue
 from pathlib import Path
@@ -19,7 +20,8 @@ def image_stream(queue, imagedir, calib, stride, skip=0):
 
     img_exts = ["*.png", "*.jpeg", "*.jpg"]
     image_list = sorted(chain.from_iterable(Path(imagedir).glob(e) for e in img_exts))[skip::stride]
-
+    tstamp_list = sorted(glob.glob(os.path.join(imagedir, "*.png")))[::stride]
+    tstamps = [float(x.split('/')[-1][:-4]) for x in tstamp_list]
     for t, imfile in enumerate(image_list):
         image = cv2.imread(str(imfile))
         if len(calib) > 4:
@@ -35,9 +37,9 @@ def image_stream(queue, imagedir, calib, stride, skip=0):
         h, w, _ = image.shape
         image = image[:h-h%16, :w-w%16]
 
-        queue.put((t, image, intrinsics))
+        queue.put((t, image, intrinsics, tstamps[t]))
 
-    queue.put((-1, image, intrinsics))
+    queue.put((-1, image, intrinsics, 0))
 
 
 def video_stream(queue, imagedir, calib, stride, skip=0):

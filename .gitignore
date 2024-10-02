@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+
+# dynamic slam log
+dynamic_slam_log/logs/*
+dynamic_slam_log/outputs/*
+
 # C extensions
 *.so
 
