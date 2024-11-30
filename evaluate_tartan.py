@@ -14,6 +14,8 @@ from dpvo.config import cfg
 from dpvo.data_readers.tartan import test_split as val_split
 from dpvo.plot_utils import plot_trajectory, save_trajectory_tum_format
 
+import pickle
+
 test_split = \
     ["MH%03d"%i for i in range(8)] + \
     ["ME%03d"%i for i in range(8)]
@@ -41,6 +43,7 @@ def video_iterator(imagedir, ext=".png", preload=True):
 
 @torch.no_grad()
 def run(imagedir, cfg, network, viz=False):
+    
     slam = DPVO(cfg, network, ht=480, wd=640, viz=viz)
 
     for t, (image, intrinsics) in enumerate(video_iterator(imagedir)):
@@ -48,7 +51,7 @@ def run(imagedir, cfg, network, viz=False):
             show_image(image, 1)
         
         with Timer("SLAM", enabled=False):
-            slam(t, image, intrinsics)
+            slam(t, image, intrinsics, t)
 
     for _ in range(12):
         slam.update()
@@ -75,7 +78,7 @@ def ate(traj_ref, traj_est, timestamps):
     result = main_ape.ape(traj_ref, traj_est, est_name='traj', 
         pose_relation=PoseRelation.translation_part, align=True, correct_scale=True)
 
-    return result.stats["rmse"]
+    return result.stats["rmse"], result
 
 
 @torch.no_grad()
@@ -96,7 +99,7 @@ def evaluate(config, net, split="validation", trials=1, plot=False, save=False):
 
         results[scene] = []
         for j in range(trials):
-
+            
             # estimated trajectory
             if split == 'test':
                 scene_path = os.path.join("datasets/mono", scene)
@@ -107,15 +110,21 @@ def evaluate(config, net, split="validation", trials=1, plot=False, save=False):
                 traj_ref = osp.join("datasets/TartanAir", scene, "pose_left.txt")
 
             # run the slam system
-            traj_est, tstamps = run(scene_path, config, net)
+            traj_est, tstamps, dynamic_slam_logger = run(scene_path, config, net)
 
             PERM = [1, 2, 0, 4, 5, 3, 6] # ned -> xyz
             traj_ref = np.loadtxt(traj_ref, delimiter=" ")[::STRIDE, PERM]
 
             # do evaluation
-            ate_score = ate(traj_ref, traj_est, tstamps)
+            ate_score, eva_result = ate(traj_ref, traj_est, tstamps)
             all_results.append(ate_score)
             results[scene].append(ate_score)
+
+            dynamic_slam_logger['result'] = eva_result
+
+            leagal_scene_name = scene.replace("/", "_")
+            dynamic_log_picke_file = open("dynamic_slam_log/logs/dynamic_slam_log_min_config_comp_"+leagal_scene_name+"_trials_"+str(j)+".pickle", "wb")
+            pickle.dump(dynamic_slam_logger, dynamic_log_picke_file)
 
             if plot:
                 scene_name = '_'.join(scene.split('/')[1:]).title()
@@ -162,7 +171,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     cfg.merge_from_file(args.config)
-
+    cfg['PATCHES_PER_FRAME'] = 16
     print("Running with config...")
     print(cfg)
 
