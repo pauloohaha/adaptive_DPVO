@@ -59,9 +59,6 @@ def transform(poses, patches, intrinsics, ii, jj, kk, depth=False, valid=False, 
     # transform
     Gij = poses[:, jj] * poses[:, ii].inv()
 
-    #stereo frames
-    Gij[0][ii == jj] = SE3(torch.tensor([-0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=torch.float, device="cuda"))
-
     if tonly:
         Gij[...,3:] = torch.as_tensor([0,0,0,1], device=Gij.device)
 

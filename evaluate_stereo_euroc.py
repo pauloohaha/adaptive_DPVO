@@ -9,7 +9,7 @@ import datetime
 from tqdm import tqdm
 
 from dpvo.utils import Timer
-from dpvo.stereo_dpvo import DPVO
+from dpvo.stereo_switching_dpvo import DPVO
 from dpvo.stream import image_stream
 from dpvo.config import cfg
 #from dpvo.plot_utils import plot_trajectory, save_trajectory_tum_format
@@ -27,7 +27,7 @@ from evo.core.metrics import PoseRelation
 
 #dynamic slam data log
 import pickle
-
+import math
 
 SKIP = 0
 
@@ -51,9 +51,17 @@ def run(cfg, network, imagedir_left, imagedir_rigt, calib, stride=1, viz=False):
     
     while 1:
         
-        (t, image_rigt, intrinsics, tstamp) = queue_rigt.get()
         (t, image_left, intrinsics, tstamp) = queue_left.get()
-        if t < 0: break
+        print("tstamp: " + str(int(tstamp)))
+        if t < 0: 
+            break
+
+        (t_rigt, image_rigt, _  , tstamp_rigt) = queue_rigt.get()
+        if t_rigt < 0:
+            break
+        
+        if tstamp_rigt != tstamp:
+            break
 
         image_left = torch.from_numpy(image_left).permute(2,0,1).cuda()
         image_rigt = torch.from_numpy(image_rigt).permute(2,0,1).cuda()
@@ -72,7 +80,8 @@ def run(cfg, network, imagedir_left, imagedir_rigt, calib, stride=1, viz=False):
     for _ in range(12):
         slam.update()
 
-    reader_left.join()
+    reader_left.terminate()
+    reader_rigt.terminate()
 
     return slam.terminate()
 
@@ -112,6 +121,11 @@ if __name__ == '__main__':
     ]
 
     results = {}
+
+    result_log_file = open("stereo_log.txt3", 'w')
+    result_log_file.write('\n')
+    result_log_file.close()
+
     for scene in euroc_scenes:
         imagedir_left = os.path.join(args.eurocdir, scene, "mav0/cam0/data")
         imagedir_rigt = os.path.join(args.eurocdir, scene, "mav0/cam1/data")
@@ -128,19 +142,48 @@ if __name__ == '__main__':
                 images_list = sorted(glob.glob(os.path.join(imagedir_left, "*.png")))[::args.stride]
                 tstamps = [float(x.split('/')[-1][:-4]) for x in images_list]
 
+                tstamps = tstamps[:len(traj_est)]
+
                 dynamic_slam_logger['original_est'] = traj_est
 
                 traj_est = PoseTrajectory3D(
-                    positions_xyz=1.10 * traj_est[:,:3],
+                    positions_xyz=traj_est[:,:3],
                     orientations_quat_wxyz=traj_est[:,3:],
                     timestamps=np.array(tstamps))
 
                 traj_ref = file_interface.read_tum_trajectory_file(groundtruth)
                 traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
 
+                result_log_file = open("stereo_log.txt3", 'a')
+                for test_idx in range(0, len(traj_est.positions_xyz)):
+                  dis_est = traj_est.positions_xyz[test_idx] - traj_est.positions_xyz[0]
+                  dis_est = dis_est[0] ** 2 + dis_est[1]**2 + dis_est[2]**2
+                  dis_est = math.sqrt(dis_est)
+
+                  dis_ref = traj_ref.positions_xyz[test_idx] - traj_ref.positions_xyz[0]
+                  dis_ref = dis_ref[0] ** 2 + dis_ref[1]**2 + dis_ref[2]**2
+                  dis_ref = math.sqrt(dis_ref)
+
+                  result_log_file.write("idx: " + str(test_idx) + "dis_est: " + str(dis_est) + "  dis_ref: " + str(dis_ref) + '\n')
+
                 result = main_ape.ape(traj_ref, traj_est, est_name='traj', 
-                    pose_relation=PoseRelation.translation_part, align=True)
+                    pose_relation=PoseRelation.translation_part, align=True, correct_scale=True)
                 ate_score = result.stats["rmse"]
+
+                for test_idx in range(0, len(traj_est.positions_xyz)):
+                  dis_est = traj_est.positions_xyz[test_idx] - traj_est.positions_xyz[0]
+                  dis_est = dis_est[0] ** 2 + dis_est[1]**2 + dis_est[2]**2
+                  dis_est = math.sqrt(dis_est)
+
+                  dis_ref = traj_ref.positions_xyz[test_idx] - traj_ref.positions_xyz[0]
+                  dis_ref = dis_ref[0] ** 2 + dis_ref[1]**2 + dis_ref[2]**2
+                  dis_ref = math.sqrt(dis_ref)
+
+                  result_log_file.write("***idx: " + str(test_idx) + "dis_est: " + str(dis_est) + "  dis_ref: " + str(dis_ref) + '\n')
+
+                
+                result_log_file.write(scene + " result: " + str(ate_score) + '\n')
+                result_log_file.close()
 
                 dynamic_slam_logger['result'] = result
 

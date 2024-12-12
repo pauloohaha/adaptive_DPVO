@@ -257,18 +257,7 @@ __global__ void reprojection_residuals_and_hessian(
     Xi[3] = patches[kx][2][1][1];
     
     float tij[3], qij[4];
-    if (ix == jx) {
-      //stereo edge
-      tij[0] =  -0.1;
-      tij[1] =     0;
-      tij[2] =     0;
-      qij[0] =     0;
-      qij[1] =     0;
-      qij[2] =     0;
-      qij[3] =     1;
-    } else {
-      relSE3(ti, qi, tj, qj, tij, qij);
-    }
+    relSE3(ti, qi, tj, qj, tij, qij);
     actSE3(tij, qij, Xi, Xj);
 
     const float X = Xj[0];
@@ -276,7 +265,7 @@ __global__ void reprojection_residuals_and_hessian(
     const float Z = Xj[2];
     const float W = Xj[3];
 
-    const float d = (Z >= 0.2) ? 1.0 / Z : 0.0; 
+    const float d = (Z >= 0.02) ? 1.0 / Z : 0.0; 
     const float d2 = d * d;
 
     const float x1 = fx * (X / Z) + cx;
