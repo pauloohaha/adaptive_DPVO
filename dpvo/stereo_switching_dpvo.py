@@ -456,7 +456,7 @@ class DPVO:
         # TODO better depth initialization
         if self.is_initialized == False:
             #let each frame has different depth during init
-            patches[:,:,2] = torch.ones_like(patches[:,:,2,0,0,None,None])
+            patches[:,:,2] = torch.rand_like(patches[:,:,2,0,0,None,None])
         else:
             s = torch.median(self.patches_[self.n-3:self.n,:,2])
             patches[:,:,2] = s
@@ -486,20 +486,34 @@ class DPVO:
         if self.n == 8 and not self.is_initialized:
             self.is_initialized = True      
 
+            #recover metric scale
             bk_poses = self.poses_[0:10].clone()
-            self.update(depth_only = True)
-
-            init_depth = 1
-            while self.patches_[0:self.n, :, 2].mean() < init_depth*0.8:
-                
-                init_depth = init_depth +  1
-                self.patches_[0:self.n, :, 2] = torch.ones_like(self.patches_[0:self.n, :, 2])*init_depth
-                
-                self.poses[0, 0:10] = bk_poses.clone()
-                self.update(depth_only = True)
+            bk_net = self.net.clone()
 
             for itr in range(12):
-                self.update()
+                self.update() 
+
+            init_depth = 1
+            #average distance between left and right camera
+            while (self.poses[0, 0:8:2, 0].mean() - self.poses[0, 1:9:2, 0].mean()) > 0.1002  :
+                
+                init_depth = init_depth +  10
+                self.patches_[0:self.n, :, 2] = torch.rand_like(self.patches_[0:self.n, :, 2])*init_depth
+                
+                self.poses[0, 0:10] = bk_poses.clone()
+                self.net = bk_net.clone()
+                for itr in range(12):
+                    self.update()
+
+            while (self.poses[0, 0:8:2, 0].mean() - self.poses[0, 1:9:2, 0].mean()) < 0.0998  :
+                
+                init_depth = init_depth -  0.5
+                self.patches_[0:self.n, :, 2] = torch.rand_like(self.patches_[0:self.n, :, 2])*init_depth
+                
+                self.poses[0, 0:10] = bk_poses.clone()
+                self.net = bk_net.clone()
+                for itr in range(12):
+                    self.update()
         
         elif self.is_initialized:
             self.update()
